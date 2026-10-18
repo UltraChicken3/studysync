@@ -1,8 +1,8 @@
-tensorflow
-opencv-python
-numpy
-customtkinter
-google-genai
-matplotlib
-seaborn
-scikit-learn
+tensorflow==2.21.0
+opencv-python==5.0.0.93
+numpy==2.5.4
+customtkinter==6.0.0
+google-genai==2.31.0
+matplotlib==3.11.2
+seaborn==0.13.2
+scikit-learn==1.9.1

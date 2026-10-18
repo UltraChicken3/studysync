@@ -32,14 +32,13 @@ These are understandable prototype choices: transfer learning is sensible for 2,
 
 ## Run locally
 
-Create a virtual environment with a Python version supported by your TensorFlow installation, then install `requirements.txt`. In PowerShell:
+Use native Windows CPython 3.12 (64-bit), not MSYS Python. The tested package versions are pinned in `requirements.txt`. If `.venv` is already installed, run `.\.venv\Scripts\python.exe nus_proj.py` from the project folder. For a fresh checkout, use a native Windows Python executable in PowerShell:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+& 'C:\Path\To\Python312\python.exe' -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 $env:GEMINI_API_KEY = '<new key>'
-python nus_proj.py
+.\.venv\Scripts\python.exe nus_proj.py
 ```
 
 Press **H** in the camera window to focus the help panel, or **Q** to quit. The panel also accepts questions without a camera cue. Without `GEMINI_API_KEY`, the webcam and panel work, but requesting generated text shows a setup message. `STUDY_BUDDY_MODEL` can point to another compatible six-output Keras model; `GEMINI_MODEL` selects the Gemini text model; `STUDY_BUDDY_CAMERA` selects the camera index. A different image backbone also requires its matching preprocessing and class mapping in the code.
