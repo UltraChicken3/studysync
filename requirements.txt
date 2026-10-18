@@ -1,0 +1,8 @@
+tensorflow
+opencv-python
+numpy
+customtkinter
+google-genai
+matplotlib
+seaborn
+scikit-learn

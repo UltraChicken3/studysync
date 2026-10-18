@@ -1,0 +1,36 @@
+# Local Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.review_frames/
+*.log
+
+# Local credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+
+# Face-image datasets and local study/session data must not enter public Git history
+/Student Dataset/
+/local-data/
+# Source datasets not used by the current app and duplicate archive
+/DAiSEE/
+/RAF-DB/
+/Student_Dataset.zip
+
+# Historical demos and deck (the recordings show an old API key)
+/*.mp4
+/*.pptx
+
+# Keep only the app model; Git LFS stores its binary content
+/*.keras
+!/study_buddy_resnet_final.keras
+/*.h5
+/*.hdf5
