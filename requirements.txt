@@ -6,3 +6,5 @@ google-genai==2.31.0
 matplotlib==3.11.2
 seaborn==0.13.2
 scikit-learn==1.9.1
+fastapi==0.156.8
+uvicorn==0.54.0

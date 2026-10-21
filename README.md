@@ -46,7 +46,22 @@ Press **H** in the camera window to focus the help panel, or **Q** to quit. The 
 
 ## Model-first web roadmap
 
-The [model-first implementation plan](IMPLEMENTATION_PLAN.md) retains the original ResNet50 and makes its predictions the trigger for a class-specific study guide offer. The [Phase 2–6 handoff](PHASES_2_TO_6.md) breaks the remaining work into implementation and verification steps. Phase 2 has begun with `study_session.py`, a background camera/session controller tested with synthetic frames. The web API and interface have not been built yet.
+The [model-first implementation plan](IMPLEMENTATION_PLAN.md) retains the original ResNet50 and makes its predictions the trigger for a class-specific study guide offer. The [Phase 2–6 handoff](PHASES_2_TO_6.md) breaks the remaining work into implementation and verification steps. The Phase 2 local web shell now has a session controller, loopback API, WebSocket status stream, and React interface. Model-led offers and web tutoring remain Phase 3–4 work; the desktop app still supports manual Gemini questions.
+
+### Run the local web shell
+
+Build the static interface once and start the loopback service from the project root:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+npm --prefix frontend ci
+npm --prefix frontend run build
+.\.venv\Scripts\python.exe run_web.py
+```
+
+Open `http://127.0.0.1:8765`. Enter a subject, goal, and session length, then press **Start monitoring**. The Python process owns the webcam and runs the unchanged saved model; the browser receives only session and tentative class status. Pause and Stop release the camera. Closing every connected page pauses capture after 15 seconds. Nothing starts monitoring on page load. The web shell does not yet call Gemini, so no key is needed for this phase.
+
+For UI work without a camera, use `.\.venv\Scripts\python.exe run_web.py --demo`. The page clearly marks synthetic cues and neither opens a camera nor runs the saved model. The normal command always uses the original checkpoint. To run Vite separately, set `STUDYSYNC_DEV_ORIGIN` to `http://127.0.0.1:5173`, start `run_web.py`, then use `npm --prefix frontend run dev`; Vite is bound to loopback and proxies to port 8765.
 
 ## Model improvement plan
 

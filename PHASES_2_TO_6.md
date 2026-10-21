@@ -11,10 +11,11 @@ in Git. Keep the existing desktop app usable while the web interface is built.
 
 - Phase 1 model integration is implemented locally. Its `MODEL_BASELINE.md` and
   synthetic/real-model smoke tests must stay green before each integration.
-- Phase 2 step 1 has begun in `study_session.py`: the controller owns one
-  camera worker, reuses one classifier, and exposes start/pause/resume/stop.
-  Synthetic lifecycle tests cover release and camera failures. API, events,
-  reconnect, UI presence, frontend, and hardware checks remain open.
+- Phase 2 implementation now includes the session worker, loopback API,
+  WebSocket snapshots, reconnect, browser-disconnect pause, React shell, and
+  an explicit synthetic demo stream. Automated lifecycle, API, and build
+  checks pass. Real Windows camera, tab/app switching, sleep/resume, and
+  unplug checks remain open before the Phase 2 gate can be marked complete.
 - Build in this order: Phase 2 session core and local web shell; Phase 3
   student-initiated tutor; Phase 4 sustained offer policy; Phase 5 evaluation
   and consented pilot; Phase 6 packaging. Phase 2 can emit tentative classes,
