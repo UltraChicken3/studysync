@@ -100,7 +100,11 @@ class WebApiTests(unittest.TestCase):
         return response.json()["session_id"]
 
     def test_control_routes_reject_invalid_origin_host_token_and_size(self):
-        self.assertEqual(self.client.get("/health").json()["session_status"], "idle")
+        health = self.client.get("/health").json()
+        self.assertEqual(health["session_status"], "idle")
+        self.assertTrue(health["key_configured"])
+        self.assertTrue(health["free_tier_confirmed"])
+        self.assertNotIn("private-test-key", str(health))
         self.assertEqual(self.client.get("/sessions/current").status_code, 403)
         body = {"subject": "Math", "goal": "Review", "duration_minutes": 10}
         self.assertEqual(self.client.post("/sessions", json=body).status_code, 403)
@@ -194,6 +198,8 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(self.client.post(
                 f"/sessions/{session_id}/pause", headers=self.auth,
             ).json()["status"], "paused")
+            with self.assertRaises(WebSocketDisconnect):
+                ws.receive_bytes()
         self.assertTrue(self.cameras[0].released)
         with self.assertRaises(WebSocketDisconnect):
             with self.client.websocket_connect(preview_url):

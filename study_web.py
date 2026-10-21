@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -363,7 +362,8 @@ def create_app(
         return {
             "service": "ready",
             "model_present": DEFAULT_MODEL_PATH.is_file(),
-            "key_configured": bool(os.environ.get("GEMINI_API_KEY")),
+            "key_configured": bool(tutor.key()),
+            "free_tier_confirmed": tutor.confirmed(),
             "tutor_ready": tutor.ready(),
             "session_status": snapshot.status if snapshot else "idle",
             "demo_mode": demo_mode,
@@ -563,26 +563,35 @@ def create_app(
                 return
             presence.connected(session_id)
             queue = preview_bus.subscribe()
+            status_queue = bus.subscribe(session_id)
             try:
                 while True:
                     incoming = asyncio.create_task(websocket.receive())
                     outgoing = asyncio.create_task(queue.get())
+                    status_update = asyncio.create_task(status_queue.get())
                     done, pending = await asyncio.wait(
-                        (incoming, outgoing), return_when=asyncio.FIRST_COMPLETED
+                        (incoming, outgoing, status_update),
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
                         task.cancel()
                     await asyncio.gather(*pending, return_exceptions=True)
                     if incoming in done and incoming.result()["type"] == "websocket.disconnect":
                         break
+                    if (status_update in done
+                            and status_update.result()["payload"]["status"] != "running"):
+                        await websocket.close(code=1000)
+                        break
                     if outgoing in done:
                         current = controller.snapshot()
                         if (current is None or current.session_id != session_id
                                 or current.status != "running"):
+                            await websocket.close(code=1000)
                             break
                         await websocket.send_bytes(outgoing.result())
             finally:
                 preview_bus.unsubscribe(queue)
+                bus.unsubscribe(status_queue)
                 presence.disconnected(session_id)
         except (WebSocketDisconnect, EndOfStream):
             return

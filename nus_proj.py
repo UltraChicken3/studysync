@@ -1,6 +1,6 @@
 """Study Buddy: tentative webcam cues and student-controlled study help.
 
-Set GEMINI_API_KEY in the environment before requesting generated answers.
+Set GEMINI_API_KEY in the environment or ignored .env before requesting answers.
 The camera classifier is a cue for offering help, never proof of a mental state.
 """
 
@@ -15,6 +15,7 @@ import customtkinter as ctk
 
 from study_buddy_inference import StudentStateClassifier
 from study_buddy_logic import CueTracker, help_mode
+from study_config import get_setting
 
 
 ROOT = Path(__file__).resolve().parent
@@ -44,7 +45,7 @@ def generate_answer(mode, topic):
     # Keep the optional API import out of the webcam startup path.
     from google import genai
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = genai.Client(api_key=get_setting("GEMINI_API_KEY"))
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=make_prompt(mode, topic),
@@ -153,8 +154,8 @@ class HelpPanel:
             self.show_answer("Enter a topic or question first.")
             self.topic.focus_set()
             return
-        if not os.environ.get("GEMINI_API_KEY"):
-            self.show_answer("Set the GEMINI_API_KEY environment variable to enable generated help.")
+        if not get_setting("GEMINI_API_KEY"):
+            self.show_answer("Set GEMINI_API_KEY in the environment or local .env to enable generated help.")
             return
         mode = "confusion" if self.mode.get() == "Explain simply" else "boredom"
         self.dismiss()

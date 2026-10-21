@@ -34,6 +34,7 @@ type Health = {
   service: string
   model_present: boolean
   key_configured: boolean
+  free_tier_confirmed: boolean
   tutor_ready: boolean
   session_status: string
   demo_mode: boolean
@@ -591,8 +592,11 @@ function App() {
             <button type="button" className="primary" disabled={helpBusy}
               onClick={sendHelp}>{helpBusy ? 'Writing…' : 'Send this text and get guide'}</button>
           </div>}
-          {!health?.tutor_ready && <p className="guide-hint">Gemini is currently off. Set a new local
-            GEMINI_API_KEY and confirm this project’s Free Tier before enabling requests.</p>}
+          {health && !health.key_configured && <p className="guide-hint">Gemini key not found by the local server.
+            Add GEMINI_API_KEY to the ignored .env file or to the PowerShell session that starts the server.</p>}
+          {health && !health.free_tier_confirmed && <p className="guide-hint">Gemini is off until you confirm this
+            key’s project and active Free Tier limits in AI Studio, then set STUDYSYNC_GEMINI_FREE_TIER_CONFIRMED=1
+            in the local .env file or server PowerShell session.</p>}
           {helpError && <p className="inline-error" role="alert">{helpError}</p>}
           {guide && <div className="answer-box" aria-live="polite"><h3>Your guide</h3>
             <GuideMarkdown text={guide.answer} />

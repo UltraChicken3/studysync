@@ -28,7 +28,7 @@ These are understandable prototype choices: transfer learning is sensible for 2,
 - Gemini requests run in a worker thread so the camera and panel continue responding. The app uses the supported `google-genai` SDK and a configurable model ID; the default is `gemini-3.5-flash-lite`.
 - Suggestions use a decisive model output plus a two-second continuous cue, then require the cue to clear and a cooldown before another offer. The 0.65 probability and 0.15 margin gates are starting values, **not validated operating thresholds**. The UI says “possible” and never submits a request based on a camera prediction alone.
 - Removed alarm sounds and the assumption that an absent face means looking away. Possible fatigue is a quiet status message. The largest detected face drives the cue, avoiding mixed predictions from multiple people.
-- Made model and data paths relative to the project by default, with environment overrides. The evaluation scripts now name their metric **validation accuracy** and verify folder class order. The key is read from `GEMINI_API_KEY` only.
+- Made model and data paths relative to the project by default, with environment overrides. The evaluation scripts now name their metric **validation accuracy** and verify folder class order. The key is read from `GEMINI_API_KEY` in the process environment or the ignored local `.env` file.
 - Moved the original face-crop and ResNet50 inference path into `study_buddy_inference.py`. See [MODEL_BASELINE.md](MODEL_BASELINE.md) for the saved model's hash, input/output contract, and class-order assumption.
 
 ## Run locally
@@ -40,11 +40,10 @@ OpenCV is pinned to the 4.x line because the original Haar face detector uses `c
 ```powershell
 & 'C:\Path\To\Python312\python.exe' -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-$env:GEMINI_API_KEY = '<new key>'
 .\.venv\Scripts\python.exe nus_proj.py
 ```
 
-Press **H** in the camera window to focus the help panel, or **Q** to quit. The panel also accepts questions without a camera cue. Without `GEMINI_API_KEY`, the webcam and panel work, but requesting generated text shows a setup message. `STUDY_BUDDY_MODEL` can point to another compatible six-output Keras model; `GEMINI_MODEL` selects the Gemini text model; `STUDY_BUDDY_CAMERA` selects the camera index. A different image backbone also requires its matching preprocessing and class mapping in the code.
+Press **H** in the camera window to focus the help panel, or **Q** to quit. The panel also accepts questions without a camera cue. The desktop app reads `GEMINI_API_KEY` from the process environment or the ignored local `.env` file described below. Without it, the webcam and panel work, but requesting generated text shows a setup message. `STUDY_BUDDY_MODEL` can point to another compatible six-output Keras model; `GEMINI_MODEL` selects the Gemini text model; `STUDY_BUDDY_CAMERA` selects the camera index. A different image backbone also requires its matching preprocessing and class mapping in the code.
 
 ## Model-first web roadmap
 
@@ -65,7 +64,18 @@ Open `http://127.0.0.1:8765`. Enter a subject and goal, then choose **Timer** fo
 
 ### Enable manual web guides
 
-The web guide uses only the pinned text model `gemini-3.5-flash-lite`. Google currently lists its text input and output as Free Tier eligible, but [active rate limits vary by project](https://ai.google.dev/gemini-api/docs/rate-limits). In [Google AI Studio](https://aistudio.google.com/), check that your project and key are on the Free Tier and inspect the active limits for this model. Rotate any old key from the original prototype first. Then set these variables locally **before** starting `run_web.py`:
+The web guide uses only the pinned text model `gemini-3.5-flash-lite`. Google currently lists its text input and output as Free Tier eligible, but [active rate limits vary by project](https://ai.google.dev/gemini-api/docs/rate-limits). In [Google AI Studio](https://aistudio.google.com/), check that your project and key are on the Free Tier and inspect the active limits for this model. Rotate any old key from the original prototype first.
+
+For persistent local setup, copy the safe template once, open `.env` in a text editor, and fill in the new key. Set the confirmation value to `1` **only after** checking the key's project and active limits in AI Studio:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+The two lines in `.env` should be `GEMINI_API_KEY=<your new key>` and `STUDYSYNC_GEMINI_FREE_TIER_CONFIRMED=1` after confirmation. The file is ignored by Git and is read by the local Python service; restart the service and refresh the browser after changing it. Do not paste the real key into source files, screenshots, chat, or Git commits. An existing PowerShell environment variable takes priority over `.env`, so remove an old session variable if it points to an old key.
+
+As an alternative, set both variables in the same PowerShell window **before** starting `run_web.py`. `$env:` values last only for that window, and an already-running Python process will not receive changes made in another window:
 
 ```powershell
 $env:GEMINI_API_KEY = '<new free-project key>'

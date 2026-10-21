@@ -2,11 +2,12 @@
 
 import asyncio
 import hashlib
-import os
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal
+
+from study_config import get_setting
 
 
 GuideMode = Literal["explain", "steps", "engage"]
@@ -111,8 +112,8 @@ class TutorService:
         self,
         *,
         generate: Callable[[str, str, float], Awaitable[str]] = gemini_generate,
-        key: Callable[[], str | None] = lambda: os.environ.get("GEMINI_API_KEY"),
-        confirmed: Callable[[], bool] = lambda: os.environ.get(
+        key: Callable[[], str | None] = lambda: get_setting("GEMINI_API_KEY"),
+        confirmed: Callable[[], bool] = lambda: get_setting(
             "STUDYSYNC_GEMINI_FREE_TIER_CONFIRMED"
         ) == "1",
         clock: Callable[[], float] = time.monotonic,
