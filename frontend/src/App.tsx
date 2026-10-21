@@ -1,14 +1,18 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
-type SessionStatus = 'running' | 'paused' | 'stopped' | 'error'
+type SessionStatus = 'running' | 'study_only' | 'paused' | 'stopped' | 'error'
+type TimerMode = 'timer' | 'stopwatch'
 type CaptureStatus = 'ok' | 'no_face' | 'camera_error' | null
 
 type Snapshot = {
   session_id: string
   subject: string
   goal: string
-  duration_seconds: number
+  duration_seconds: number | null
   elapsed_seconds: number
+  timer_mode: TimerMode
   status: SessionStatus
   capture_status: CaptureStatus
   tentative_class: string | null
@@ -38,6 +42,7 @@ type Health = {
 type GuideMode = 'explain' | 'steps' | 'engage'
 type Preview = { prompt: string; digest: string }
 type Guide = { request_id: string; mode: GuideMode; answer: string }
+type FollowUp = { request_id: string; mode: 'followup'; answer: string }
 
 type SessionEvent = {
   session_id: string | null
@@ -49,7 +54,16 @@ type SessionEvent = {
 
 const formatTime = (seconds: number) => {
   const whole = Math.floor(seconds)
+  if (whole >= 3600) return `${Math.floor(whole / 3600)}:${String(Math.floor(whole % 3600 / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`
   return `${String(Math.floor(whole / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`
+}
+
+const markdownElements = ['p', 'h1', 'h2', 'h3', 'h4', 'strong', 'em', 'ul', 'ol', 'li',
+  'code', 'pre', 'blockquote', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'del', 'hr', 'br']
+
+function GuideMarkdown({ text }: { text: string }) {
+  return <div className="guide-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}
+    allowedElements={markdownElements} unwrapDisallowed skipHtml>{text}</ReactMarkdown></div>
 }
 
 function App() {
@@ -62,6 +76,7 @@ function App() {
   const [subject, setSubject] = useState('')
   const [goal, setGoal] = useState('')
   const [duration, setDuration] = useState(25)
+  const [timerMode, setTimerMode] = useState<TimerMode>('timer')
   const [monitoring, setMonitoring] = useState(true)
   const [guideMode, setGuideMode] = useState<GuideMode>('explain')
   const [topic, setTopic] = useState('')
@@ -72,7 +87,30 @@ function App() {
   const [helpError, setHelpError] = useState('')
   const [feedback, setFeedback] = useState('')
   const [acceptedOfferId, setAcceptedOfferId] = useState<string | null>(null)
+  const [reply, setReply] = useState('')
+  const [replyPreview, setReplyPreview] = useState<Preview | null>(null)
+  const [replyResult, setReplyResult] = useState<FollowUp | null>(null)
+  const [submittedReply, setSubmittedReply] = useState('')
+  const [desktopAlerts, setDesktopAlerts] = useState(() => localStorage.getItem('studysync_desktop_alerts') === '1')
+  const [alertMessage, setAlertMessage] = useState('')
+  const [showPreview, setShowPreview] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [previewError, setPreviewError] = useState('')
+  const [clockTick, setClockTick] = useState(Date.now())
+  const snapshotReceivedAt = useRef(Date.now())
+  const notifiedOfferId = useRef<string | null>(null)
   const sequence = useRef(-1)
+
+  function applySnapshot(snapshot: Snapshot | null) {
+    snapshotReceivedAt.current = Date.now()
+    setClockTick(snapshotReceivedAt.current)
+    setSession(snapshot)
+  }
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setClockTick(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -86,10 +124,12 @@ function App() {
         if (!cancelled) {
           setToken(boot.token)
           setHealth(status)
-          setSession(current)
+          applySnapshot(current)
           if (current) {
             setSubject(current.subject)
             setGoal(current.goal)
+            setTimerMode(current.timer_mode)
+            if (current.duration_seconds !== null) setDuration(current.duration_seconds / 60)
           }
         }
       } catch {
@@ -115,7 +155,7 @@ function App() {
         const event: SessionEvent = JSON.parse(message.data)
         if (event.type === 'snapshot' && event.payload && event.sequence >= sequence.current) {
           sequence.current = event.sequence
-          setSession(event.payload)
+          applySnapshot(event.payload)
           setConnected(true)
           setError('')
         }
@@ -134,6 +174,71 @@ function App() {
       setConnected(false)
     }
   }, [token, session?.session_id])
+
+  useEffect(() => {
+    if (!showPreview || !token || !session?.session_id || session.status !== 'running') {
+      setPreviewUrl('')
+      return
+    }
+    let closed = false
+    let currentUrl = ''
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const socket = new WebSocket(`${protocol}//${window.location.host}/sessions/${session.session_id}/preview`)
+    socket.binaryType = 'blob'
+    setPreviewError('')
+    socket.onopen = () => socket.send(JSON.stringify({ token }))
+    socket.onmessage = (message) => {
+      if (!(message.data instanceof Blob)) return
+      const nextUrl = URL.createObjectURL(new Blob([message.data], { type: 'image/jpeg' }))
+      const oldUrl = currentUrl
+      currentUrl = nextUrl
+      setPreviewUrl(nextUrl)
+      if (oldUrl) URL.revokeObjectURL(oldUrl)
+    }
+    socket.onerror = () => socket.close()
+    socket.onclose = () => {
+      if (!closed) setPreviewError('Preview disconnected. Hide and show it to retry.')
+    }
+    return () => {
+      closed = true
+      socket.close()
+      if (currentUrl) URL.revokeObjectURL(currentUrl)
+      setPreviewUrl('')
+    }
+  }, [showPreview, token, session?.session_id, session?.status])
+
+  useEffect(() => {
+    const offer = session?.offer
+    if (!offer || notifiedOfferId.current === offer.offer_id) return
+    notifiedOfferId.current = offer.offer_id
+    if (desktopAlerts && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      const notification = new Notification('StudySync: optional study cue', {
+        body: offer.message, tag: offer.offer_id,
+      })
+      notification.onclick = () => { window.focus(); notification.close() }
+    }
+  }, [session?.offer?.offer_id, desktopAlerts])
+
+  async function toggleDesktopAlerts() {
+    if (desktopAlerts) {
+      setDesktopAlerts(false)
+      localStorage.removeItem('studysync_desktop_alerts')
+      setAlertMessage('Desktop alerts off. In-page offers remain visible.')
+      return
+    }
+    if (!('Notification' in window)) {
+      setAlertMessage('Desktop alerts are unavailable in this browser. In-page offers remain visible.')
+      return
+    }
+    const permission = await Notification.requestPermission()
+    if (permission === 'granted') {
+      setDesktopAlerts(true)
+      localStorage.setItem('studysync_desktop_alerts', '1')
+      setAlertMessage('Desktop alerts on for offers while this page is hidden.')
+    } else {
+      setAlertMessage('Desktop alerts were not allowed. In-page offers remain visible.')
+    }
+  }
 
   async function request<T>(path: string, body?: object): Promise<T> {
     const response = await fetch(path, {
@@ -158,12 +263,18 @@ function App() {
     setError('')
     try {
       sequence.current = -1
-      setSession(await request<Snapshot>('/sessions', {
+      const started = await request<Snapshot>('/sessions', {
         subject,
         goal,
-        duration_minutes: duration,
+        duration_minutes: timerMode === 'timer' ? duration : null,
+        timer_mode: timerMode,
         monitoring,
-      }))
+      })
+      applySnapshot(started)
+      setShowPreview(false)
+      setGuide(null)
+      setReplyPreview(null)
+      setReplyResult(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not start the session')
     } finally {
@@ -176,7 +287,7 @@ function App() {
     setBusy(true)
     setError('')
     try {
-      setSession(await request<Snapshot>(`/sessions/${session.session_id}/${action}`))
+      applySnapshot(await request<Snapshot>(`/sessions/${session.session_id}/${action}`))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : `Could not ${action} the session`)
     } finally {
@@ -214,6 +325,9 @@ function App() {
     setHelpError('')
     setGuide(null)
     setFeedback('')
+    setReply('')
+    setReplyPreview(null)
+    setReplyResult(null)
     try {
       const result = await request<Guide>(`/sessions/${session.session_id}/help`, {
         mode: guideMode, topic, excerpt,
@@ -226,6 +340,46 @@ function App() {
       setAcceptedOfferId(null)
     } catch (cause) {
       setHelpError(cause instanceof Error ? cause.message : 'Could not get a guide')
+    } finally {
+      setHelpBusy(false)
+    }
+  }
+
+  async function previewReply(event: FormEvent) {
+    event.preventDefault()
+    if (!session || !guide) return
+    setHelpBusy(true)
+    setHelpError('')
+    try {
+      setReplyPreview(await request<Preview>(`/sessions/${session.session_id}/followup/preview`, {
+        guide_request_id: guide.request_id,
+        guide_context: guide.answer.slice(-2400),
+        reply,
+      }))
+    } catch (cause) {
+      setHelpError(cause instanceof Error ? cause.message : 'Could not prepare your reply')
+    } finally {
+      setHelpBusy(false)
+    }
+  }
+
+  async function sendReply() {
+    if (!session || !guide || !replyPreview) return
+    setHelpBusy(true)
+    setHelpError('')
+    try {
+      const result = await request<FollowUp>(`/sessions/${session.session_id}/followup`, {
+        guide_request_id: guide.request_id,
+        guide_context: guide.answer.slice(-2400),
+        reply,
+        approved_digest: replyPreview.digest,
+        request_id: crypto.randomUUID().replaceAll('-', ''),
+      })
+      setSubmittedReply(reply)
+      setReplyResult(result)
+      setReplyPreview(null)
+    } catch (cause) {
+      setHelpError(cause instanceof Error ? cause.message : 'Could not get feedback on your reply')
     } finally {
       setHelpBusy(false)
     }
@@ -261,7 +415,7 @@ function App() {
     if (selected.has(cueClass)) selected.delete(cueClass)
     else selected.add(cueClass)
     try {
-      setSession(await request<Snapshot>(`/sessions/${session.session_id}/offer-classes`, {
+      applySnapshot(await request<Snapshot>(`/sessions/${session.session_id}/offer-classes`, {
         enabled: [...selected],
       }))
     } catch (cause) {
@@ -279,8 +433,13 @@ function App() {
     }
   }
 
-  const active = session?.status === 'running' || session?.status === 'paused'
-  const progress = session ? Math.min(100, session.elapsed_seconds / session.duration_seconds * 100) : 0
+  const active = session?.status === 'running' || session?.status === 'study_only' || session?.status === 'paused'
+  const clockRunning = session?.status === 'running' || session?.status === 'study_only'
+  const elapsed = session ? session.elapsed_seconds + (clockRunning
+    ? Math.max(0, (clockTick - snapshotReceivedAt.current) / 1000) : 0) : 0
+  const shownElapsed = session?.duration_seconds !== null && session
+    ? Math.min(elapsed, session.duration_seconds) : elapsed
+  const progress = session?.duration_seconds ? Math.min(100, shownElapsed / session.duration_seconds * 100) : 0
 
   return (
     <div className="app-shell">
@@ -314,10 +473,17 @@ function App() {
               <textarea id="goal" value={goal} onChange={(event) => setGoal(event.target.value)}
                 placeholder="e.g. Practice derivatives and the chain rule"
                 maxLength={500} rows={3} required disabled={active} />
-              <label htmlFor="duration">Session length</label>
-              <div className="duration-field"><input id="duration" type="number" min="1" max="240"
-                value={duration} onChange={(event) => setDuration(Number(event.target.value))}
-                disabled={active} /><span>minutes</span></div>
+              <fieldset className="time-choice"><legend>Study clock</legend>
+                <label><input type="radio" name="timer-mode" checked={timerMode === 'timer'}
+                  onChange={() => setTimerMode('timer')} disabled={active} />Timer</label>
+                <label><input type="radio" name="timer-mode" checked={timerMode === 'stopwatch'}
+                  onChange={() => setTimerMode('stopwatch')} disabled={active} />Stopwatch</label>
+              </fieldset>
+              {timerMode === 'timer' ? <><label htmlFor="duration">Session length</label>
+                <div className="duration-field"><input id="duration" type="number" min="1" max="240"
+                  value={duration} onChange={(event) => setDuration(Number(event.target.value))}
+                  disabled={active} required /><span>minutes</span></div></>
+                : <p className="clock-hint">Count up until you choose to stop.</p>}
               <label className="monitor-choice"><input type="checkbox" checked={monitoring}
                 onChange={(event) => setMonitoring(event.target.checked)} disabled={active} />
                 Use camera cues during this session</label>
@@ -328,21 +494,39 @@ function App() {
 
           <section className="panel live-panel">
             <div className="panel-title"><span className="step">02</span><h2>Session status</h2></div>
-            <div className="clock">{formatTime(session?.elapsed_seconds || 0)}
-              <span> / {formatTime(session?.duration_seconds || duration * 60)}</span></div>
-            <div className="progress" role="progressbar" aria-valuenow={Math.round(progress)}
-              aria-valuemin={0} aria-valuemax={100}><div style={{ width: `${progress}%` }} /></div>
+            <div className="clock">{formatTime(shownElapsed)}
+              <span>{(session?.timer_mode || timerMode) === 'timer'
+                ? ` / ${formatTime(session?.duration_seconds ?? duration * 60)}` : ' elapsed'}</span></div>
+            {(session?.timer_mode || timerMode) === 'timer'
+              ? <div className="progress" role="progressbar" aria-valuenow={Math.round(progress)}
+                aria-valuemin={0} aria-valuemax={100}><div style={{ width: `${progress}%` }} /></div>
+              : <p className="clock-hint">Stopwatch · No preset end time</p>}
             <div className="status-grid">
-              <div><span>Monitoring</span><strong>{session?.status || 'Not started'}</strong></div>
+              <div><span>Session</span><strong>{session?.status === 'study_only'
+                ? 'Studying without camera' : session?.status || 'Not started'}</strong></div>
               <div><span>Camera</span><strong>{health?.demo_mode ? 'Simulation only' : session?.capture_status === 'ok' ? 'Face visible' :
                 session?.capture_status === 'no_face' ? 'Face not visible' :
                 session?.status === 'running' ? 'Starting…' : 'Off'}</strong></div>
               <div><span>{health?.demo_mode ? 'Synthetic cue' : 'Model cue'}</span><strong>{session?.tentative_class || 'No cue'}</strong></div>
               <div><span>Model file</span><strong>{health?.model_present ? 'Ready' : 'Missing'}</strong></div>
             </div>
+            {(session?.status === 'running' || showPreview) && <div className="camera-preview-control">
+              <button type="button" aria-pressed={showPreview} onClick={() => {
+                setShowPreview((current) => !current)
+                setPreviewError('')
+              }}>{showPreview ? 'Hide camera preview' : 'Show camera preview'}</button>
+              {showPreview && <div className="camera-preview" role="group" aria-label="Local camera preview">
+                {previewUrl && session?.status === 'running'
+                  ? <img src={previewUrl} alt="Live view from your local camera" />
+                  : <p>{session?.status === 'running' ? 'Waiting for camera frames…' : 'Preview paused.'}</p>}
+                {previewError && <p role="alert">{previewError}</p>}
+              </div>}
+              <p>Shown only when you choose. The preview stays on this computer and is not saved or sent to Gemini.</p>
+            </div>}
             {session?.error && <p className="inline-error" role="alert">{session.error}</p>}
             <div className="controls">
-              {session?.status === 'running' && <button type="button" onClick={() => control('pause')} disabled={busy}>Pause</button>}
+              {(session?.status === 'running' || session?.status === 'study_only') &&
+                <button type="button" onClick={() => control('pause')} disabled={busy}>Pause</button>}
               {session?.status === 'paused' && <button type="button" onClick={() => control('resume')} disabled={busy}>Resume</button>}
               {active && <button className="stop" type="button" onClick={() => control('stop')} disabled={busy}>Stop session</button>}
             </div>
@@ -354,10 +538,16 @@ function App() {
                   checked={session?.enabled_offers?.includes(cueClass) || false}
                   onChange={() => toggleOfferClass(cueClass)} />{cueClass}</label>)}
             </fieldset>}
+            <div className="desktop-alert-setting">
+              <button type="button" onClick={toggleDesktopAlerts}>
+                {desktopAlerts ? 'Turn off desktop alerts' : 'Enable desktop alerts'}</button>
+              <p>Optional alerts appear when this page is hidden. In-page offers are always shown.</p>
+              {alertMessage && <small role="status">{alertMessage}</small>}
+            </div>
           </section>
         </div>
 
-        {session?.offer && active && <section className="offer-card" aria-live="polite">
+        {session?.offer && active && <section className="offer-card" id="offer-notice" role="status" aria-live="polite">
           <span className="offer-eyebrow">OPTIONAL MODEL CUE</span>
           <h2>{session.offer.message}</h2>
           <p>The saved model has shown a sustained, tentative {session.offer.cue_class.toLowerCase()} cue.
@@ -405,7 +595,26 @@ function App() {
             GEMINI_API_KEY and confirm this project’s Free Tier before enabling requests.</p>}
           {helpError && <p className="inline-error" role="alert">{helpError}</p>}
           {guide && <div className="answer-box" aria-live="polite"><h3>Your guide</h3>
-            <p>{guide.answer}</p><div className="feedback-row">
+            <GuideMarkdown text={guide.answer} />
+            <div className="reply-area">
+              <h4>Respond to the guide</h4>
+              <p>If the guide asks a question, type your answer here. Your reply and relevant guide text are sent only after you review the preview. This uses another request from your local guide budget.</p>
+              {!replyResult && <form onSubmit={previewReply} className="guide-form">
+                <label htmlFor="student-reply">Your answer or follow-up</label>
+                <textarea id="student-reply" value={reply} maxLength={500} rows={3} required
+                  onChange={(event) => { setReply(event.target.value); setReplyPreview(null) }}
+                  placeholder="Type your answer or ask a follow-up question." />
+                <button type="submit" disabled={!active || helpBusy}>Preview reply to Gemini</button>
+              </form>}
+              {replyPreview && <div className="preview-box"><h4>Text to Gemini</h4>
+                <pre>{replyPreview.prompt}</pre>
+                <button type="button" className="primary" disabled={helpBusy}
+                  onClick={sendReply}>{helpBusy ? 'Checking…' : 'Send this reply'}</button>
+              </div>}
+              {replyResult && <div className="reply-result"><h4>Your answer</h4><p>{submittedReply}</p>
+                <h4>Guide feedback</h4><GuideMarkdown text={replyResult.answer} /></div>}
+            </div>
+            <div className="feedback-row">
               <span>Was this helpful?</span>
               {(['useful', 'irrelevant', 'too_easy', 'too_hard', 'incorrect', 'wrong_cue'] as const).map((choice) =>
                 <button key={choice} type="button" onClick={() => sendFeedback(choice)}>{choice.replace('_', ' ')}</button>)}</div>

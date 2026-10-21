@@ -118,7 +118,7 @@ class WebApiTests(unittest.TestCase):
         ).status_code, 403)
         self.assertEqual(self.client.post(
             "/sessions", headers=self.auth,
-            content=b"x" * 4097,
+            content=b"x" * 16385,
         ).status_code, 413)
         self.assertIsNone(self.client.get("/sessions/current", headers=self.auth).json())
 
@@ -178,6 +178,27 @@ class WebApiTests(unittest.TestCase):
         self.client = TestClient(self.app)
         self.client.__enter__()
 
+    def test_camera_preview_requires_opt_in_and_reuses_capture(self):
+        session_id = self.start()
+        preview_url = f"/sessions/{session_id}/preview"
+        with self.client.websocket_connect(preview_url) as ws:
+            ws.send_json({"token": "wrong"})
+            with self.assertRaises(WebSocketDisconnect):
+                ws.receive_bytes()
+        with self.client.websocket_connect(preview_url) as ws:
+            ws.send_json({"token": self.token})
+            jpeg = ws.receive_bytes()
+            self.assertTrue(jpeg.startswith(b"\xff\xd8"))
+            self.assertTrue(jpeg.endswith(b"\xff\xd9"))
+            self.assertEqual(len(self.cameras), 1)
+            self.assertEqual(self.client.post(
+                f"/sessions/{session_id}/pause", headers=self.auth,
+            ).json()["status"], "paused")
+        self.assertTrue(self.cameras[0].released)
+        with self.assertRaises(WebSocketDisconnect):
+            with self.client.websocket_connect(preview_url):
+                pass
+
     def test_old_session_tab_does_not_keep_new_camera_session_running(self):
         first_id = self.start()
         with self.client.websocket_connect(f"/sessions/{first_id}/events") as old_ws:
@@ -196,7 +217,7 @@ class WebApiTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 200)
         session_id = response.json()["session_id"]
-        self.assertEqual(response.json()["status"], "paused")
+        self.assertEqual(response.json()["status"], "study_only")
         self.assertEqual(self.cameras, [])
         help_url = f"/sessions/{session_id}/help"
         body = {"mode": "steps", "topic": "Chain rule", "excerpt": "d/dx f(g(x))"}
@@ -257,6 +278,53 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(guide.status_code, 200, guide.text)
             self.assertEqual(len(self.tutor_calls), 1)
             self.assertEqual(self.controller.snapshot().status, "running")
+
+    def test_stopwatch_and_approved_reply_without_camera(self):
+        started = self.client.post("/sessions", headers=self.auth, json={
+            "subject": "Math", "goal": "Review", "timer_mode": "stopwatch",
+            "duration_minutes": None, "monitoring": False,
+        })
+        self.assertEqual(started.status_code, 200, started.text)
+        snapshot = started.json()
+        self.assertEqual(snapshot["status"], "study_only")
+        self.assertIsNone(snapshot["duration_seconds"])
+        self.assertEqual(snapshot["timer_mode"], "stopwatch")
+        self.assertEqual(self.cameras, [])
+        session_id = snapshot["session_id"]
+        url = f"/sessions/{session_id}/help"
+        body = {"mode": "engage", "topic": "Backpropagation"}
+        preview = self.client.post(f"{url}/preview", headers=self.auth, json=body).json()
+        initial_id = "f" * 32
+        guide = self.client.post(url, headers=self.auth, json={
+            **body, "request_id": initial_id, "approved_digest": preview["digest"],
+        })
+        self.assertEqual(guide.status_code, 200, guide.text)
+        follow_url = f"/sessions/{session_id}/followup"
+        follow_body = {"guide_request_id": initial_id,
+                       "guide_context": guide.json()["answer"],
+                       "reply": "Decrease the positive contribution."}
+        bad_guide = self.client.post(f"{follow_url}/preview", headers=self.auth, json={
+            **follow_body, "guide_request_id": "0" * 32,
+        })
+        self.assertEqual(bad_guide.status_code, 409)
+        follow_preview = self.client.post(
+            f"{follow_url}/preview", headers=self.auth, json=follow_body,
+        )
+        self.assertEqual(follow_preview.status_code, 200, follow_preview.text)
+        self.assertIn("Decrease the positive contribution.", follow_preview.json()["prompt"])
+        mismatch = self.client.post(follow_url, headers=self.auth, json={
+            **follow_body, "request_id": "d" * 32, "approved_digest": "0" * 64,
+        })
+        self.assertEqual(mismatch.status_code, 409)
+        result = self.client.post(follow_url, headers=self.auth, json={
+            **follow_body, "request_id": "d" * 32,
+            "approved_digest": follow_preview.json()["digest"],
+        })
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["mode"], "followup")
+        self.assertEqual(self.tutor_calls[-1], follow_preview.json()["prompt"])
+        self.assertEqual(len(self.tutor_calls), 2)
+        self.assertEqual(self.cameras, [])
 
 
 if __name__ == "__main__":

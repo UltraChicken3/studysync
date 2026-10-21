@@ -3,7 +3,9 @@
 import asyncio
 import unittest
 
-from study_tutor import TutorError, TutorService, make_prompt, prompt_digest
+from study_tutor import (
+    TutorError, TutorService, make_prompt, make_followup_prompt, prompt_digest,
+)
 
 
 class TutorTests(unittest.IsolatedAsyncioTestCase):
@@ -76,6 +78,31 @@ class TutorTests(unittest.IsolatedAsyncioTestCase):
             await self.ask()
         self.assertEqual(unconfirmed.exception.code, "free_tier_unconfirmed")
         self.assertEqual(self.calls, [])
+
+    async def test_followup_requires_completed_guide_and_uses_same_budget(self):
+        context = "### Quick challenge\nWhich direction should the weight change?"
+        reply = "Decrease it."
+        prompt = make_followup_prompt(context, reply)
+        self.assertIn(context, prompt)
+        self.assertIn(reply, prompt)
+        self.assertIn("Do not ask a new question", prompt)
+        with self.assertRaises(TutorError) as missing:
+            await self.service.ask_followup("s", "a" * 32, "b" * 32,
+                                            context, reply, prompt_digest(prompt))
+        self.assertEqual(missing.exception.code, "guide_not_found")
+        await self.ask()
+        self.now[0] += 60
+        result = await self.service.ask_followup(
+            "s", "a" * 32, "b" * 32, context, reply, prompt_digest(prompt),
+        )
+        self.assertEqual(result["mode"], "followup")
+        self.assertEqual(self.calls[-1][0], prompt)
+        self.now[0] += 60
+        with self.assertRaises(TutorError) as budget:
+            await self.service.ask_followup(
+                "s", "a" * 32, "c" * 32, context, reply, prompt_digest(prompt),
+            )
+        self.assertEqual(budget.exception.code, "session_budget")
 
     async def test_concurrency_timeout_quota_empty_and_secret_redaction(self):
         waiting = asyncio.Event()

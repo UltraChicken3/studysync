@@ -4,13 +4,16 @@ import asyncio
 import logging
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
+from typing import Literal
 from urllib.parse import urlsplit
 
+import cv2
 from anyio import EndOfStream
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse
@@ -20,7 +23,10 @@ from starlette.websockets import WebSocketDisconnect
 
 from study_buddy_inference import DEFAULT_MODEL_PATH
 from study_session import SessionController, SessionSnapshot
-from study_tutor import MAX_EXCERPT, MAX_TOPIC, TutorError, TutorService, make_prompt, prompt_digest
+from study_tutor import (
+    MAX_EXCERPT, MAX_TOPIC, MAX_FOLLOWUP_CONTEXT, MAX_REPLY,
+    TutorError, TutorService, make_prompt, make_followup_prompt, prompt_digest,
+)
 
 
 FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
@@ -30,7 +36,8 @@ logger = logging.getLogger(__name__)
 class SessionRequest(BaseModel):
     subject: str = Field(min_length=1, max_length=120)
     goal: str = Field(min_length=1, max_length=500)
-    duration_minutes: float = Field(ge=1, le=240)
+    duration_minutes: float | None = Field(default=None, ge=1, le=240)
+    timer_mode: Literal["timer", "stopwatch"] = "timer"
     monitoring: bool = True
 
 
@@ -44,6 +51,17 @@ class HelpRequest(HelpText):
     request_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     approved_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     offer_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+
+
+class FollowUpText(BaseModel):
+    guide_request_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    guide_context: str = Field(min_length=1, max_length=MAX_FOLLOWUP_CONTEXT)
+    reply: str = Field(min_length=1, max_length=MAX_REPLY)
+
+
+class FollowUpRequest(FollowUpText):
+    request_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    approved_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class FeedbackRequest(BaseModel):
@@ -117,6 +135,54 @@ class EventBus:
             queue.put_nowait(event)
 
 
+class PreviewBus:
+    """Encode small transient JPEGs only while a local viewer is subscribed."""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._subscribers: set[asyncio.Queue[bytes]] = set()
+        self._last_encoded = 0.0
+
+    def attach(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+
+    def subscribe(self) -> asyncio.Queue[bytes]:
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1)
+        with self._lock:
+            self._subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[bytes]) -> None:
+        with self._lock:
+            self._subscribers.discard(queue)
+        while not queue.empty():
+            queue.get_nowait()
+
+    def publish(self, frame) -> None:
+        with self._lock:
+            now = time.monotonic()
+            if (not self._subscribers or self._loop is None
+                    or now - self._last_encoded < 0.25):
+                return
+            self._last_encoded = now
+            loop = self._loop
+        height, width = frame.shape[:2]
+        if width > 480:
+            frame = cv2.resize(frame, (480, max(1, round(height * 480 / width))))
+        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+        if ok:
+            loop.call_soon_threadsafe(self._fan_out, encoded.tobytes())
+
+    def _fan_out(self, jpeg: bytes) -> None:
+        with self._lock:
+            subscribers = tuple(self._subscribers)
+        for queue in subscribers:
+            if queue.full():
+                queue.get_nowait()
+            queue.put_nowait(jpeg)
+
+
 class Presence:
     """Pause capture after the last browser connection has been gone briefly."""
 
@@ -144,7 +210,7 @@ class Presence:
 
     def require_connection(self) -> None:
         snapshot = self.controller.snapshot()
-        if (snapshot and snapshot.status == "running"
+        if (snapshot and snapshot.status in ("running", "study_only")
                 and self.connections.get(snapshot.session_id, 0) == 0):
             if self._task is not None and self._task_session_id == snapshot.session_id:
                 return
@@ -158,7 +224,7 @@ class Presence:
             await asyncio.sleep(self.grace_seconds)
             snapshot = self.controller.snapshot()
             if (snapshot and snapshot.session_id == session_id
-                    and snapshot.status == "running"
+                    and snapshot.status in ("running", "study_only")
                     and self.connections.get(session_id, 0) == 0):
                 try:
                     await asyncio.to_thread(self.controller.pause)
@@ -203,8 +269,10 @@ def create_app(
                 or parsed.port is None or parsed.path or parsed.query or parsed.fragment):
             raise ValueError("Development origin must be a loopback HTTP origin")
     bus = EventBus()
+    preview_bus = PreviewBus()
     controller = controller or SessionController()
     previous_observer = controller.on_update
+    previous_preview = controller.on_preview
 
     def publish(snapshot: SessionSnapshot) -> None:
         bus.publish(snapshot)
@@ -212,6 +280,13 @@ def create_app(
             previous_observer(snapshot)
 
     controller.on_update = publish
+
+    def publish_preview(frame) -> None:
+        preview_bus.publish(frame)
+        if previous_preview is not None:
+            previous_preview(frame)
+
+    controller.on_preview = publish_preview
     presence = Presence(controller, disconnect_grace_seconds)
     tutor = tutor or TutorService()
     token = secrets.token_urlsafe(32)
@@ -219,6 +294,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         bus.attach(asyncio.get_running_loop())
+        preview_bus.attach(asyncio.get_running_loop())
         try:
             yield
         finally:
@@ -251,9 +327,9 @@ def create_app(
                 declared_size = int(request.headers.get("content-length", "0"))
             except ValueError:
                 return JSONResponse({"detail": "Invalid request size"}, status_code=400)
-            if declared_size > 4096:
+            if declared_size > 16384:
                 return JSONResponse({"detail": "Request too large"}, status_code=413)
-            if len(await request.body()) > 4096:
+            if len(await request.body()) > 16384:
                 return JSONResponse({"detail": "Request too large"}, status_code=413)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -271,7 +347,7 @@ def create_app(
 
     def active_snapshot(session_id: str) -> SessionSnapshot:
         snapshot = matching_snapshot(session_id)
-        if snapshot.status not in ("running", "paused"):
+        if snapshot.status not in ("running", "study_only", "paused"):
             raise HTTPException(status_code=409, detail="Start an active study session first")
         return snapshot
 
@@ -306,7 +382,8 @@ def create_app(
     async def start_session(body: SessionRequest):
         try:
             snapshot = await asyncio.to_thread(
-                controller.start, body.subject, body.goal, body.duration_minutes, body.monitoring
+                controller.start, body.subject, body.goal, body.duration_minutes,
+                body.monitoring, body.timer_mode,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -357,6 +434,30 @@ def create_app(
             return await tutor.ask(
                 session_id, body.request_id, body.mode, body.topic,
                 body.excerpt, body.approved_digest,
+            )
+        except TutorError as exc:
+            raise HTTPException(status_code=exc.status, detail={
+                "code": exc.code, "message": exc.message,
+            }) from exc
+
+    @app.post("/sessions/{session_id}/followup/preview", dependencies=[Depends(require_token)])
+    def preview_followup(session_id: str, body: FollowUpText):
+        active_snapshot(session_id)
+        if not tutor.has_completed(session_id, body.guide_request_id):
+            raise HTTPException(status_code=409, detail="A completed guide is required for a reply")
+        try:
+            prompt = make_followup_prompt(body.guide_context, body.reply)
+        except TutorError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+        return {"prompt": prompt, "digest": prompt_digest(prompt)}
+
+    @app.post("/sessions/{session_id}/followup", dependencies=[Depends(require_token)])
+    async def request_followup(session_id: str, body: FollowUpRequest):
+        active_snapshot(session_id)
+        try:
+            return await tutor.ask_followup(
+                session_id, body.guide_request_id, body.request_id,
+                body.guide_context, body.reply, body.approved_digest,
             )
         except TutorError as exc:
             raise HTTPException(status_code=exc.status, detail={
@@ -438,6 +539,54 @@ def create_app(
         except ValueError:
             await websocket.close(code=1008)
         except asyncio.TimeoutError:
+            await websocket.close(code=1008)
+
+    @app.websocket("/sessions/{session_id}/preview")
+    async def session_preview(websocket: WebSocket, session_id: str):
+        if not safe_origin(
+            websocket.headers.get("host"),
+            websocket.headers.get("origin"),
+            websocket.headers.get("sec-fetch-site"),
+        ):
+            await websocket.close(code=1008)
+            return
+        snapshot = controller.snapshot()
+        if snapshot is None or snapshot.session_id != session_id or snapshot.status != "running":
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        try:
+            first = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+            supplied = first.get("token") if isinstance(first, dict) else None
+            if not isinstance(supplied, str) or not secrets.compare_digest(supplied, token):
+                await websocket.close(code=1008)
+                return
+            presence.connected(session_id)
+            queue = preview_bus.subscribe()
+            try:
+                while True:
+                    incoming = asyncio.create_task(websocket.receive())
+                    outgoing = asyncio.create_task(queue.get())
+                    done, pending = await asyncio.wait(
+                        (incoming, outgoing), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    if incoming in done and incoming.result()["type"] == "websocket.disconnect":
+                        break
+                    if outgoing in done:
+                        current = controller.snapshot()
+                        if (current is None or current.session_id != session_id
+                                or current.status != "running"):
+                            break
+                        await websocket.send_bytes(outgoing.result())
+            finally:
+                preview_bus.unsubscribe(queue)
+                presence.disconnected(session_id)
+        except (WebSocketDisconnect, EndOfStream):
+            return
+        except (ValueError, asyncio.TimeoutError):
             await websocket.close(code=1008)
 
     if static_dir.is_dir():
