@@ -12,11 +12,9 @@ from pathlib import Path
 
 import cv2
 import customtkinter as ctk
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.applications.resnet50 import preprocess_input
 
-from study_buddy_logic import CueTracker, classify_probabilities, help_mode
+from study_buddy_inference import StudentStateClassifier
+from study_buddy_logic import CueTracker, help_mode
 
 
 ROOT = Path(__file__).resolve().parent
@@ -191,14 +189,7 @@ class HelpPanel:
 def main():
     if not MODEL_PATH.is_file():
         raise FileNotFoundError(f"Model not found: {MODEL_PATH}")
-    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
-    if model.output_shape[-1] != 6:
-        raise ValueError("The selected model must output the six Student Dataset classes")
-    cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-    if cascade.empty():
-        raise RuntimeError("OpenCV's face detector could not be loaded")
+    classifier = StudentStateClassifier(MODEL_PATH)
     camera = cv2.VideoCapture(CAMERA_INDEX)
     if not camera.isOpened():
         raise RuntimeError(f"Could not open camera {CAMERA_INDEX}")
@@ -208,27 +199,21 @@ def main():
     try:
         while not panel.closed:
             ok, frame = camera.read()
-            if not ok:
+            frame = cv2.flip(frame, 1) if ok and frame is not None and frame.size else None
+            result = classifier.infer_frame(frame)
+            now = time.monotonic()
+            if result.capture_status == "camera_error":
                 panel.set_status("Camera feed stopped.")
                 break
-            frame = cv2.flip(frame, 1)
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-            now = time.monotonic()
-            if len(faces) == 0:
+            if result.capture_status == "no_face":
                 state = "Face not visible"
                 tracker.observe(None, now)
             else:
-                # Use one face; multiple faces previously mixed a global buffer.
-                x, y, w, h = max(faces, key=lambda face: face[2] * face[3])
-                rgb = cv2.cvtColor(cv2.resize(frame[y:y+h, x:x+w], (224, 224)),
-                                   cv2.COLOR_BGR2RGB)
-                batch = preprocess_input(np.expand_dims(rgb.astype(np.float32), 0))
-                probabilities = model.predict(batch, verbose=0)[0]
-                state = classify_probabilities(probabilities)
+                state = result.tentative_class
                 offer = tracker.observe(help_mode(state), now)
                 if offer:
                     panel.suggest(offer)
+                x, y, w, h = result.face_box
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (180, 200, 220), 2)
 
             if state in ("Confused", "Frustrated"):

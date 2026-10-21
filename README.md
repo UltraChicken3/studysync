@@ -29,6 +29,7 @@ These are understandable prototype choices: transfer learning is sensible for 2,
 - Suggestions use a decisive model output plus a two-second continuous cue, then require the cue to clear and a cooldown before another offer. The 0.65 probability and 0.15 margin gates are starting values, **not validated operating thresholds**. The UI says “possible” and never submits a request based on a camera prediction alone.
 - Removed alarm sounds and the assumption that an absent face means looking away. Possible fatigue is a quiet status message. The largest detected face drives the cue, avoiding mixed predictions from multiple people.
 - Made model and data paths relative to the project by default, with environment overrides. The evaluation scripts now name their metric **validation accuracy** and verify folder class order. The key is read from `GEMINI_API_KEY` only.
+- Moved the original face-crop and ResNet50 inference path into `study_buddy_inference.py`. See [MODEL_BASELINE.md](MODEL_BASELINE.md) for the saved model's hash, input/output contract, and class-order assumption.
 
 ## Run locally
 
@@ -45,7 +46,7 @@ Press **H** in the camera window to focus the help panel, or **Q** to quit. The 
 
 ## Model-first web roadmap
 
-The [model-first implementation plan](IMPLEMENTATION_PLAN.md) retains the original ResNet50 and makes its predictions the trigger for a class-specific study guide offer. It covers cross-app monitoring, a local web interface, data and model evaluation, free-tier API controls, release phases, and later optimization candidates. The web app has not been built yet.
+The [model-first implementation plan](IMPLEMENTATION_PLAN.md) retains the original ResNet50 and makes its predictions the trigger for a class-specific study guide offer. The [Phase 2–6 handoff](PHASES_2_TO_6.md) breaks the remaining work into implementation and verification steps. Phase 2 has begun with `study_session.py`, a background camera/session controller tested with synthetic frames. The web API and interface have not been built yet.
 
 ## Model improvement plan
 
@@ -54,7 +55,7 @@ The [model-first implementation plan](IMPLEMENTATION_PLAN.md) retains the origin
 3. **Measure the complete chain.** Report per-class metrics, calibration assessment, CPU latency, false offers per study hour, student corrections, and guide usefulness. Compare model-led offers with manual help to determine whether the model adds value.
 4. **Optimize after the baseline.** Consider temporal modeling, calibration, retraining the same ResNet50, or a smaller model only after the original pipeline has measured results and a proposed change is reviewed.
 
-The included `test_study_buddy_logic.py` checks the confidence gate and one-off suggestion behavior. A live webcam, TensorFlow inference, and Gemini response could not be tested in this workspace because those packages and a configured camera/API key are not available.
+The logic and inference tests check cue behavior and the original model path with synthetic frames. The saved Keras model loads and produces six finite outputs in the configured environment. A live webcam session and Gemini response still require hardware access and a configured API key.
 
 ## Demo and deck checks
 
