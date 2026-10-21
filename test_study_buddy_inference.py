@@ -129,6 +129,14 @@ class InferenceTests(unittest.TestCase):
         self.assertTrue(np.isfinite(result.scores).all())
         self.assertAlmostEqual(sum(result.scores), 1.0, places=5)
 
+    def test_installed_opencv_can_load_real_haar_detector(self):
+        classifier = StudentStateClassifier(
+            model=FakeModel([0.01, 0.95, 0.01, 0.01, 0.01, 0.01])
+        )
+        self.assertFalse(classifier.cascade.empty())
+        result = classifier.infer_frame(np.zeros((224, 224, 3), dtype=np.uint8))
+        self.assertEqual(result.capture_status, "no_face")
+
 
 if __name__ == "__main__":
     unittest.main()

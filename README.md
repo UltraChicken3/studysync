@@ -35,6 +35,8 @@ These are understandable prototype choices: transfer learning is sensible for 2,
 
 Use native Windows CPython 3.12 (64-bit), not MSYS Python. The tested package versions are pinned in `requirements.txt`. If `.venv` is already installed, run `.\.venv\Scripts\python.exe nus_proj.py` from the project folder. For a fresh checkout, use a native Windows Python executable in PowerShell:
 
+OpenCV is pinned to the 4.x line because the original Haar face detector uses `cv2.CascadeClassifier`; the standard OpenCV 5 wheel no longer provides it. If monitoring reports a missing `CascadeClassifier`, run `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` and restart the web service.
+
 ```powershell
 & 'C:\Path\To\Python312\python.exe' -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt

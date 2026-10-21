@@ -1,5 +1,5 @@
 tensorflow==2.21.0
-opencv-python==5.0.0.93
+opencv-python==4.14.0.94
 numpy==2.5.4
 customtkinter==6.0.0
 google-genai==2.31.0

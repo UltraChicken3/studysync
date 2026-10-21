@@ -47,9 +47,17 @@ class StudentStateClassifier:
         if self.model.output_shape[-1] != len(CLASS_NAMES):
             raise ValueError("The selected model must output the six Student Dataset classes")
 
-        self.cascade = cascade if cascade is not None else cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
+        if cascade is None:
+            if not hasattr(cv2, "CascadeClassifier"):
+                raise RuntimeError(
+                    "OpenCV Haar face detection is unavailable. Install the pinned "
+                    "runtime packages with .venv\\Scripts\\python.exe -m pip install -r requirements.txt"
+                )
+            self.cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+        else:
+            self.cascade = cascade
         if self.cascade.empty():
             raise RuntimeError("OpenCV's face detector could not be loaded")
 
