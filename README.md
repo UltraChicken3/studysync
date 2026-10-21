@@ -46,7 +46,7 @@ Press **H** in the camera window to focus the help panel, or **Q** to quit. The 
 
 ## Model-first web roadmap
 
-The [model-first implementation plan](IMPLEMENTATION_PLAN.md) retains the original ResNet50 and makes its predictions the trigger for a class-specific study guide offer. The [Phase 2–6 handoff](PHASES_2_TO_6.md) breaks the remaining work into implementation and verification steps. The Phase 2 local web shell now has a session controller, loopback API, WebSocket status stream, and React interface. Model-led offers and web tutoring remain Phase 3–4 work; the desktop app still supports manual Gemini questions.
+The [model-first implementation plan](IMPLEMENTATION_PLAN.md) retains the original ResNet50 and makes its predictions the trigger for a class-specific study guide offer. The [Phase 2–6 handoff](PHASES_2_TO_6.md) breaks the remaining work into implementation and verification steps. The local web shell has a session controller, loopback API, WebSocket status stream, React interface, manual text guides, and provisional model-led offers. The desktop app still supports manual Gemini questions.
 
 ### Run the local web shell
 
@@ -59,7 +59,22 @@ npm --prefix frontend run build
 .\.venv\Scripts\python.exe run_web.py
 ```
 
-Open `http://127.0.0.1:8765`. Enter a subject, goal, and session length, then press **Start monitoring**. The Python process owns the webcam and runs the unchanged saved model; the browser receives only session and tentative class status. Pause and Stop release the camera. Closing every connected page pauses capture after 15 seconds. Nothing starts monitoring on page load. The web shell does not yet call Gemini, so no key is needed for this phase.
+Open `http://127.0.0.1:8765`. Enter a subject, goal, and session length, then press **Start monitoring**. The Python process owns the webcam and runs the unchanged saved model; the browser receives only session and tentative class status. Uncheck camera cues to start a manual-only session without opening a webcam. Pause and Stop release the camera. Closing every connected page pauses capture after 15 seconds. Nothing starts monitoring on page load.
+
+### Enable manual web guides
+
+The web guide uses only the pinned text model `gemini-3.5-flash-lite`. Google currently lists its text input and output as Free Tier eligible, but [active rate limits vary by project](https://ai.google.dev/gemini-api/docs/rate-limits). In [Google AI Studio](https://aistudio.google.com/), check that your project and key are on the Free Tier and inspect the active limits for this model. Rotate any old key from the original prototype first. Then set these variables locally **before** starting `run_web.py`:
+
+```powershell
+$env:GEMINI_API_KEY = '<new free-project key>'
+$env:STUDYSYNC_GEMINI_FREE_TIER_CONFIRMED = '1'
+.\.venv\Scripts\python.exe run_web.py
+```
+
+The student previews the complete prompt and presses **Send this text and get guide**. Only their typed question and optional pasted excerpt are included; frames, face scores, the key, and the session goal are not sent. The excerpt is limited to 1,600 characters and the question to 500. The local service allows one request at a time, at most two attempts per session, five in a rolling 24 hours, and one per minute, with a 20-second timeout and 1,024 output-token cap. These caps are process-local and reset when the service restarts; they are safeguards, not a substitute for AI Studio's live project quota. Gemini's own Free Tier quota applies to the entire project, including other clients. If a project has billing enabled, verify its tier before setting the confirmation flag. Free Tier submitted content may be used by Google to improve its products, so paste only text you are comfortable sharing. See [Google's pricing](https://ai.google.dev/gemini-api/docs/pricing).
+
+Without the key or confirmation, sessions, camera cues, prompt preview, and feedback remain local and usable. A real request is intentionally not part of automated tests. No automatic Gemini request occurs from a face prediction.
+During monitoring, the original six scores are averaged over a rolling three-second window. Sustained Confused, Frustrated, or Bored evidence creates one quiet offer for that episode. Drowsy break offers are optional and off by default; Focused, Looking Away, Uncertain, and no face do not create guide offers. You can accept, dismiss, mark the cue wrong, snooze for five minutes, or disable an offer class. Accepting preselects a guide type and topic but still requires prompt preview and a second explicit send action. These thresholds are provisional and need calibration and a consenting pilot before claims about reliability.
 
 For UI work without a camera, use `.\.venv\Scripts\python.exe run_web.py --demo`. The page clearly marks synthetic cues and neither opens a camera nor runs the saved model. The normal command always uses the original checkpoint. To run Vite separately, set `STUDYSYNC_DEV_ORIGIN` to `http://127.0.0.1:5173`, start `run_web.py`, then use `npm --prefix frontend run dev`; Vite is bound to loopback and proxies to port 8765.
 

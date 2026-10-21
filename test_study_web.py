@@ -11,6 +11,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from study_buddy_inference import InferenceResult
 from study_session import SessionController
+from study_offer import OfferPolicy
+from study_tutor import TutorService
 from study_web import create_app
 
 
@@ -56,6 +58,20 @@ class WebApiTests(unittest.TestCase):
             camera_factory=make_camera,
             classifier_factory=Classifier,
             sample_interval=0.01,
+            offer_policy_factory=lambda: OfferPolicy(
+                window_seconds=0.1, min_samples=2, hold_seconds=0.02,
+                max_gap_seconds=0.1, clear_seconds=0.03, cooldown_seconds=0.2,
+            ),
+        )
+        self.tutor_calls = []
+
+        async def fake_tutor(prompt, key, timeout):
+            self.tutor_calls.append(prompt)
+            return "Use the chain rule."
+
+        self.tutor = TutorService(
+            generate=fake_tutor, key=lambda: "private-test-key", confirmed=lambda: True,
+            min_interval_seconds=0,
         )
         self.temp = TemporaryDirectory()
         self.app = create_app(
@@ -63,6 +79,7 @@ class WebApiTests(unittest.TestCase):
             static_dir=Path(self.temp.name) / "missing",
             allowed_hosts=("testserver",),
             disconnect_grace_seconds=0.12,
+            tutor=self.tutor,
         )
         self.client = TestClient(self.app)
         self.client.__enter__()
@@ -170,7 +187,76 @@ class WebApiTests(unittest.TestCase):
             second_id = self.start()
             self.assertNotEqual(first_id, second_id)
             wait_for(lambda: self.controller.snapshot().status == "paused")
-            self.assertTrue(self.cameras[-1].released)
+            wait_for(lambda: self.cameras[-1].released)
+
+    def test_manual_help_works_with_camera_off_and_requires_preview(self):
+        response = self.client.post("/sessions", headers=self.auth, json={
+            "subject": "Math", "goal": "Review", "duration_minutes": 20,
+            "monitoring": False,
+        })
+        self.assertEqual(response.status_code, 200)
+        session_id = response.json()["session_id"]
+        self.assertEqual(response.json()["status"], "paused")
+        self.assertEqual(self.cameras, [])
+        help_url = f"/sessions/{session_id}/help"
+        body = {"mode": "steps", "topic": "Chain rule", "excerpt": "d/dx f(g(x))"}
+        preview = self.client.post(f"{help_url}/preview", headers=self.auth, json=body)
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertIn("small achievable steps", preview.json()["prompt"])
+        self.assertNotIn("private-test-key", preview.text)
+        self.assertEqual(self.client.post(help_url, json=body).status_code, 403)
+        mismatch = self.client.post(help_url, headers=self.auth, json={
+            **body, "request_id": "a" * 32, "approved_digest": "0" * 64,
+        })
+        self.assertEqual(mismatch.status_code, 409)
+        guide = self.client.post(help_url, headers=self.auth, json={
+            **body, "request_id": "a" * 32,
+            "approved_digest": preview.json()["digest"],
+        })
+        self.assertEqual(guide.status_code, 200, guide.text)
+        self.assertEqual(guide.json()["answer"], "Use the chain rule.")
+        self.assertEqual(self.tutor_calls, [preview.json()["prompt"]])
+        self.assertEqual(self.cameras, [])
+        feedback = self.client.post(
+            f"/sessions/{session_id}/feedback", headers=self.auth,
+            json={"choice": "useful"},
+        )
+        self.assertEqual(feedback.json(), {"recorded": True, "count": 1})
+        self.assertNotIn("private-test-key", guide.text)
+        self.assertEqual(self.client.post(f"{help_url}/preview", headers=self.auth, json={
+            "mode": "unknown", "topic": "Chain rule",
+        }).status_code, 422)
+
+    def test_model_offer_requires_acceptance_before_guide(self):
+        session_id = self.start()
+        with self.client.websocket_connect(f"/sessions/{session_id}/events") as ws:
+            ws.send_json({"token": self.token})
+            ws.receive_json()
+            wait_for(lambda: self.controller.snapshot().offer is not None)
+            offer = self.controller.snapshot().offer
+            self.assertEqual(offer["cue_class"], "Confused")
+            self.assertEqual(offer["guide_mode"], "explain")
+            self.assertNotIn("scores", offer)
+            self.assertEqual(self.client.get(
+                f"/sessions/{session_id}", headers=self.auth,
+            ).json()["offer"]["offer_id"], offer["offer_id"])
+            body = {"mode": "explain", "topic": "Derivatives"}
+            path = f"/sessions/{session_id}/help"
+            preview = self.client.post(f"{path}/preview", headers=self.auth, json=body).json()
+            help_body = {**body, "request_id": "e" * 32,
+                         "approved_digest": preview["digest"],
+                         "offer_id": offer["offer_id"]}
+            blocked = self.client.post(path, headers=self.auth, json=help_body)
+            self.assertEqual(blocked.status_code, 409)
+            accepted = self.client.post(
+                f"/sessions/{session_id}/offers/{offer['offer_id']}/action",
+                headers=self.auth, json={"action": "accept"},
+            )
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            guide = self.client.post(path, headers=self.auth, json=help_body)
+            self.assertEqual(guide.status_code, 200, guide.text)
+            self.assertEqual(len(self.tutor_calls), 1)
+            self.assertEqual(self.controller.snapshot().status, "running")
 
 
 if __name__ == "__main__":

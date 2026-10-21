@@ -13,15 +13,31 @@ type Snapshot = {
   capture_status: CaptureStatus
   tentative_class: string | null
   error: string | null
+  offer: Offer | null
+  enabled_offers: string[]
+}
+
+type Offer = {
+  offer_id: string
+  cue_class: string
+  guide_mode: 'explain' | 'steps' | 'engage' | 'break'
+  message: string
+  sample_count: number
+  window_seconds: number
 }
 
 type Health = {
   service: string
   model_present: boolean
   key_configured: boolean
+  tutor_ready: boolean
   session_status: string
   demo_mode: boolean
 }
+
+type GuideMode = 'explain' | 'steps' | 'engage'
+type Preview = { prompt: string; digest: string }
+type Guide = { request_id: string; mode: GuideMode; answer: string }
 
 type SessionEvent = {
   session_id: string | null
@@ -46,7 +62,16 @@ function App() {
   const [subject, setSubject] = useState('')
   const [goal, setGoal] = useState('')
   const [duration, setDuration] = useState(25)
-  const [showHelp, setShowHelp] = useState(false)
+  const [monitoring, setMonitoring] = useState(true)
+  const [guideMode, setGuideMode] = useState<GuideMode>('explain')
+  const [topic, setTopic] = useState('')
+  const [excerpt, setExcerpt] = useState('')
+  const [preview, setPreview] = useState<Preview | null>(null)
+  const [guide, setGuide] = useState<Guide | null>(null)
+  const [helpBusy, setHelpBusy] = useState(false)
+  const [helpError, setHelpError] = useState('')
+  const [feedback, setFeedback] = useState('')
+  const [acceptedOfferId, setAcceptedOfferId] = useState<string | null>(null)
   const sequence = useRef(-1)
 
   useEffect(() => {
@@ -110,7 +135,7 @@ function App() {
     }
   }, [token, session?.session_id])
 
-  async function request(path: string, body?: object): Promise<Snapshot> {
+  async function request<T>(path: string, body?: object): Promise<T> {
     const response = await fetch(path, {
       method: 'POST',
       headers: {
@@ -121,7 +146,8 @@ function App() {
     })
     if (!response.ok) {
       const failure = await response.json().catch(() => null)
-      throw new Error(failure?.detail || `Request failed (${response.status})`)
+      const detail = failure?.detail
+      throw new Error(typeof detail === 'string' ? detail : detail?.message || `Request failed (${response.status})`)
     }
     return response.json()
   }
@@ -132,10 +158,11 @@ function App() {
     setError('')
     try {
       sequence.current = -1
-      setSession(await request('/sessions', {
+      setSession(await request<Snapshot>('/sessions', {
         subject,
         goal,
         duration_minutes: duration,
+        monitoring,
       }))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not start the session')
@@ -149,11 +176,106 @@ function App() {
     setBusy(true)
     setError('')
     try {
-      setSession(await request(`/sessions/${session.session_id}/${action}`))
+      setSession(await request<Snapshot>(`/sessions/${session.session_id}/${action}`))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : `Could not ${action} the session`)
     } finally {
       setBusy(false)
+    }
+  }
+
+  function changeHelpText(field: 'mode' | 'topic' | 'excerpt', value: string) {
+    setPreview(null)
+    setHelpError('')
+    if (field === 'mode') setGuideMode(value as GuideMode)
+    if (field === 'topic') setTopic(value)
+    if (field === 'excerpt') setExcerpt(value)
+  }
+
+  async function previewHelp(event: FormEvent) {
+    event.preventDefault()
+    if (!session) return
+    setHelpBusy(true)
+    setHelpError('')
+    try {
+      setPreview(await request<Preview>(`/sessions/${session.session_id}/help/preview`, {
+        mode: guideMode, topic, excerpt,
+      }))
+    } catch (cause) {
+      setHelpError(cause instanceof Error ? cause.message : 'Could not prepare the preview')
+    } finally {
+      setHelpBusy(false)
+    }
+  }
+
+  async function sendHelp() {
+    if (!session || !preview) return
+    setHelpBusy(true)
+    setHelpError('')
+    setGuide(null)
+    setFeedback('')
+    try {
+      const result = await request<Guide>(`/sessions/${session.session_id}/help`, {
+        mode: guideMode, topic, excerpt,
+        approved_digest: preview.digest,
+        request_id: crypto.randomUUID().replaceAll('-', ''),
+        offer_id: acceptedOfferId,
+      })
+      setGuide(result)
+      setPreview(null)
+      setAcceptedOfferId(null)
+    } catch (cause) {
+      setHelpError(cause instanceof Error ? cause.message : 'Could not get a guide')
+    } finally {
+      setHelpBusy(false)
+    }
+  }
+
+  async function actOnOffer(action: 'accept' | 'dismiss' | 'snooze' | 'wrong_cue') {
+    if (!session?.offer) return
+    setError('')
+    try {
+      const result = await request<{ offer: Offer }>(
+        `/sessions/${session.session_id}/offers/${session.offer.offer_id}/action`, { action },
+      )
+      setSession((current) => current ? { ...current, offer: null } : current)
+      if (action === 'accept') {
+        if (result.offer.guide_mode === 'break') {
+          if (session.status === 'running') await control('pause')
+        } else {
+          setGuideMode(result.offer.guide_mode)
+          setTopic((current) => current || session.goal)
+          setPreview(null)
+          setAcceptedOfferId(result.offer.offer_id)
+          document.getElementById('guide-panel')?.scrollIntoView({ behavior: 'smooth' })
+        }
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not update the offer')
+    }
+  }
+
+  async function toggleOfferClass(cueClass: string) {
+    if (!session) return
+    const selected = new Set(session.enabled_offers)
+    if (selected.has(cueClass)) selected.delete(cueClass)
+    else selected.add(cueClass)
+    try {
+      setSession(await request<Snapshot>(`/sessions/${session.session_id}/offer-classes`, {
+        enabled: [...selected],
+      }))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not update offer settings')
+    }
+  }
+
+  async function sendFeedback(choice: string) {
+    if (!session) return
+    try {
+      await request(`/sessions/${session.session_id}/feedback`, { choice })
+      setFeedback('Thanks. Your feedback was counted on this computer.')
+    } catch (cause) {
+      setHelpError(cause instanceof Error ? cause.message : 'Could not record feedback')
     }
   }
 
@@ -196,8 +318,11 @@ function App() {
               <div className="duration-field"><input id="duration" type="number" min="1" max="240"
                 value={duration} onChange={(event) => setDuration(Number(event.target.value))}
                 disabled={active} /><span>minutes</span></div>
-              {!active && <button className="primary" type="submit" disabled={!token || busy || (!health?.model_present && !health?.demo_mode)}>
-                {busy ? 'Starting…' : 'Start monitoring'}</button>}
+              <label className="monitor-choice"><input type="checkbox" checked={monitoring}
+                onChange={(event) => setMonitoring(event.target.checked)} disabled={active} />
+                Use camera cues during this session</label>
+              {!active && <button className="primary" type="submit" disabled={!token || busy || (monitoring && !health?.model_present && !health?.demo_mode)}>
+                {busy ? 'Starting…' : monitoring ? 'Start monitoring' : 'Start without camera'}</button>}
             </form>
           </section>
 
@@ -223,17 +348,69 @@ function App() {
             </div>
             <p className="fine-print">The model output is a tentative cue, not a statement about how you feel.
               Switching tabs or apps does not pause a session you started. Closing this page pauses it after a short grace period.</p>
+            {active && <fieldset className="offer-settings"><legend>Optional model offers</legend>
+              {(['Confused', 'Frustrated', 'Bored', 'Drowsy'] as const).map((cueClass) =>
+                <label key={cueClass}><input type="checkbox"
+                  checked={session?.enabled_offers?.includes(cueClass) || false}
+                  onChange={() => toggleOfferClass(cueClass)} />{cueClass}</label>)}
+            </fieldset>}
           </section>
         </div>
 
-        <section className="help-strip">
-          <div><span className="step">03</span><h2>Need a hand?</h2>
-            <p>Manual study guides and model-led offers are the next implementation step.</p></div>
-          <button type="button" onClick={() => setShowHelp(!showHelp)}>
-            {showHelp ? 'Hide details' : 'How help will work'}</button>
-          {showHelp && <p className="help-details">You will choose whether to send your typed topic and selected notes
-            to Gemini. No camera frame or model score will be sent. Until this is connected, the desktop app still
-            supports manual questions.</p>}
+        {session?.offer && active && <section className="offer-card" aria-live="polite">
+          <span className="offer-eyebrow">OPTIONAL MODEL CUE</span>
+          <h2>{session.offer.message}</h2>
+          <p>The saved model has shown a sustained, tentative {session.offer.cue_class.toLowerCase()} cue.
+            You can correct or ignore it. No study text is sent unless you preview and approve a guide.</p>
+          <div className="offer-actions">
+            <button type="button" className="primary" onClick={() => actOnOffer('accept')}>
+              {session.offer.guide_mode === 'break' ? 'Pause for a break' : 'Prepare a guide'}</button>
+            <button type="button" onClick={() => actOnOffer('dismiss')}>Dismiss</button>
+            <button type="button" onClick={() => actOnOffer('snooze')}>Snooze 5 min</button>
+            <button type="button" onClick={() => actOnOffer('wrong_cue')}>This cue is wrong</button>
+          </div>
+        </section>}
+
+        <section className="panel guide-panel" id="guide-panel">
+          <div className="panel-title"><span className="step">03</span><h2>Ask for a study guide</h2></div>
+          <p>Choose the kind of help you want. Review the exact text before it goes to Gemini.
+            Camera frames, model scores, and your API key are never included.</p>
+          {acceptedOfferId && <p className="guide-hint">A model offer selected this guide type. You can change it before approving.</p>}
+          <form onSubmit={previewHelp} className="guide-form">
+            <label htmlFor="guide-mode">Guide type</label>
+            <select id="guide-mode" value={guideMode}
+              onChange={(event) => changeHelpText('mode', event.target.value)}>
+              <option value="explain">Plain explanation and example</option>
+              <option value="steps">Small steps and a next action</option>
+              <option value="engage">Analogy, application, and challenge</option>
+            </select>
+            <label htmlFor="topic">Your question or topic</label>
+            <textarea id="topic" value={topic} maxLength={500} rows={3} required
+              onChange={(event) => changeHelpText('topic', event.target.value)}
+              placeholder="What would you like help with?" />
+            <label htmlFor="excerpt">Optional excerpt from your notes</label>
+            <textarea id="excerpt" value={excerpt} maxLength={1600} rows={4}
+              onChange={(event) => changeHelpText('excerpt', event.target.value)}
+              placeholder="Paste only text you are comfortable sending." />
+            <small>{excerpt.length}/1600 characters</small>
+            <button type="submit" disabled={!active || helpBusy}>Preview text to send</button>
+          </form>
+          {!active && <p className="guide-hint">Start a session first. You can leave camera cues off.</p>}
+          {preview && <div className="preview-box"><h3>Text to Gemini</h3>
+            <pre>{preview.prompt}</pre>
+            <button type="button" className="primary" disabled={helpBusy}
+              onClick={sendHelp}>{helpBusy ? 'Writing…' : 'Send this text and get guide'}</button>
+          </div>}
+          {!health?.tutor_ready && <p className="guide-hint">Gemini is currently off. Set a new local
+            GEMINI_API_KEY and confirm this project’s Free Tier before enabling requests.</p>}
+          {helpError && <p className="inline-error" role="alert">{helpError}</p>}
+          {guide && <div className="answer-box" aria-live="polite"><h3>Your guide</h3>
+            <p>{guide.answer}</p><div className="feedback-row">
+              <span>Was this helpful?</span>
+              {(['useful', 'irrelevant', 'too_easy', 'too_hard', 'incorrect', 'wrong_cue'] as const).map((choice) =>
+                <button key={choice} type="button" onClick={() => sendFeedback(choice)}>{choice.replace('_', ' ')}</button>)}</div>
+            {feedback && <small role="status">{feedback}</small>}
+          </div>}
         </section>
       </main>
       <footer>Local by design · The camera is released when monitoring pauses or stops.</footer>

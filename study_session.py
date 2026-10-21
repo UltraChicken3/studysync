@@ -10,6 +10,7 @@ from uuid import uuid4
 import cv2
 
 from study_buddy_inference import InferenceResult, StudentStateClassifier
+from study_offer import OFFER_MODES, OfferPolicy
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ class SessionSnapshot:
     capture_status: str | None
     tentative_class: str | None
     error: str | None
+    offer: dict | None = None
+    enabled_offers: tuple[str, ...] = ()
 
 
 class SessionController:
@@ -41,6 +44,7 @@ class SessionController:
         classifier_factory: Callable[[], object] = StudentStateClassifier,
         clock: Callable[[], float] = monotonic,
         on_update: Callable[[SessionSnapshot], None] | None = None,
+        offer_policy_factory: Callable[[], OfferPolicy] = OfferPolicy,
     ):
         if sample_interval <= 0:
             raise ValueError("sample_interval must be positive")
@@ -50,6 +54,7 @@ class SessionController:
         self.classifier_factory = classifier_factory
         self.clock = clock
         self.on_update = on_update
+        self.offer_policy_factory = offer_policy_factory
         self._lock = RLock()
         self._classifier = None
         self._worker: Thread | None = None
@@ -64,6 +69,8 @@ class SessionController:
         self._capture_status: str | None = None
         self._tentative_class: str | None = None
         self._error: str | None = None
+        self._offer_policy: OfferPolicy | None = None
+        self._accepted_offer_ids: set[str] = set()
 
     def snapshot(self) -> SessionSnapshot | None:
         with self._lock:
@@ -82,9 +89,12 @@ class SessionController:
                 self._capture_status,
                 self._tentative_class,
                 self._error,
+                self._offer_policy.active.as_payload() if self._offer_policy and self._offer_policy.active else None,
+                tuple(name for name in OFFER_MODES if self._offer_policy and name in self._offer_policy.enabled),
             )
 
-    def start(self, subject: str, goal: str, duration_minutes: float) -> SessionSnapshot:
+    def start(self, subject: str, goal: str, duration_minutes: float,
+              monitoring: bool = True) -> SessionSnapshot:
         subject, goal = subject.strip(), goal.strip()
         if not subject or len(subject) > 120 or not goal or len(goal) > 500:
             raise ValueError("Enter a subject and goal within the length limits")
@@ -99,12 +109,15 @@ class SessionController:
             self._subject, self._goal = subject, goal
             self._duration = duration_minutes * 60
             self._elapsed = 0.0
-            self._run_started = self.clock()
-            self._status = "running"
+            self._run_started = self.clock() if monitoring else None
+            self._status = "running" if monitoring else "paused"
             self._capture_status = None
             self._tentative_class = None
             self._error = None
-            self._start_worker()
+            self._offer_policy = self.offer_policy_factory()
+            self._accepted_offer_ids.clear()
+            if monitoring:
+                self._start_worker()
         self._publish()
         return self.snapshot()
 
@@ -116,6 +129,8 @@ class SessionController:
             self._status = "paused"
             self._capture_status = None
             self._tentative_class = None
+            if self._offer_policy:
+                self._offer_policy.reset_evidence()
             self._stop_signal.set()
             worker = self._worker
         self._join_worker(worker)
@@ -143,6 +158,9 @@ class SessionController:
             self._status = "stopped"
             self._capture_status = None
             self._tentative_class = None
+            if self._offer_policy:
+                self._offer_policy.active = None
+                self._offer_policy.reset_evidence()
             if self._stop_signal is not None:
                 self._stop_signal.set()
             worker = self._worker
@@ -153,6 +171,31 @@ class SessionController:
     def shutdown(self) -> None:
         if self.snapshot() is not None:
             self.stop()
+
+    def act_offer(self, offer_id: str, action: str) -> dict:
+        with self._lock:
+            if self._status not in ("running", "paused") or self._offer_policy is None:
+                raise RuntimeError("No active study session")
+            try:
+                offer = self._offer_policy.act(offer_id, action, self.clock())
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            if action == "accept":
+                self._accepted_offer_ids.add(offer_id)
+        self._publish()
+        return {"action": action, "offer": offer.as_payload()}
+
+    def offer_was_accepted(self, offer_id: str) -> bool:
+        with self._lock:
+            return offer_id in self._accepted_offer_ids
+
+    def set_offer_classes(self, enabled: set[str]) -> SessionSnapshot:
+        with self._lock:
+            if self._status not in ("running", "paused") or self._offer_policy is None:
+                raise RuntimeError("No active study session")
+            self._offer_policy.set_enabled(enabled)
+        self._publish()
+        return self.snapshot()
 
     def _freeze_clock(self) -> None:
         if self._run_started is not None:
@@ -198,6 +241,11 @@ class SessionController:
                         break
                     self._capture_status = result.capture_status
                     self._tentative_class = result.tentative_class
+                    if self._offer_policy:
+                        self._offer_policy.observe(
+                            result.scores if result.capture_status == "ok" else None,
+                            self.clock(),
+                        )
                 self._publish()
                 frame = None
                 signal.wait(self.sample_interval)
@@ -216,6 +264,9 @@ class SessionController:
                     self._capture_status = None
                     self._tentative_class = None
                     self._error = None if completed else failure
+                    if self._offer_policy:
+                        self._offer_policy.active = None
+                        self._offer_policy.reset_evidence()
                     publish = True
                 else:
                     publish = False

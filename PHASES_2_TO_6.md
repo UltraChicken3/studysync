@@ -16,6 +16,15 @@ in Git. Keep the existing desktop app usable while the web interface is built.
   an explicit synthetic demo stream. Automated lifecycle, API, and build
   checks pass. Real Windows camera, tab/app switching, sleep/resume, and
   unplug checks remain open before the Phase 2 gate can be marked complete.
+- Phase 3 now has a camera-off manual session, exact prompt preview, explicit
+  text approval, three guide formats, a bounded async Gemini path, local usage
+  limits, sanitized errors, and feedback counters. Synthetic fake-tutor tests
+  pass. A real Free Tier request and Windows camera checks remain manual gates.
+- Phase 4 now has rolling six-score aggregation, per-class optional offers,
+  one offer per sustained episode, dismiss/snooze/wrong-cue actions, and an
+  accepted-offer-to-guide path. Synthetic timing and API tests pass. Thresholds
+  are provisional; real-model pilot evidence and Windows interaction checks
+  remain before the Phase 4 gate can be declared complete.
 - Build in this order: Phase 2 session core and local web shell; Phase 3
   student-initiated tutor; Phase 4 sustained offer policy; Phase 5 evaluation
   and consented pilot; Phase 6 packaging. Phase 2 can emit tentative classes,

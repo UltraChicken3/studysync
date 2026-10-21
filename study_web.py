@@ -11,6 +11,7 @@ from pathlib import Path
 from threading import Lock
 from urllib.parse import urlsplit
 
+from anyio import EndOfStream
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +20,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from study_buddy_inference import DEFAULT_MODEL_PATH
 from study_session import SessionController, SessionSnapshot
+from study_tutor import MAX_EXCERPT, MAX_TOPIC, TutorError, TutorService, make_prompt, prompt_digest
 
 
 FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
@@ -29,6 +31,31 @@ class SessionRequest(BaseModel):
     subject: str = Field(min_length=1, max_length=120)
     goal: str = Field(min_length=1, max_length=500)
     duration_minutes: float = Field(ge=1, le=240)
+    monitoring: bool = True
+
+
+class HelpText(BaseModel):
+    mode: str
+    topic: str = Field(min_length=1, max_length=MAX_TOPIC)
+    excerpt: str = Field(default="", max_length=MAX_EXCERPT)
+
+
+class HelpRequest(HelpText):
+    request_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    approved_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    offer_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+
+
+class FeedbackRequest(BaseModel):
+    choice: str
+
+
+class OfferActionRequest(BaseModel):
+    action: str
+
+
+class OfferClassesRequest(BaseModel):
+    enabled: list[str] = Field(max_length=4)
 
 
 class EventBus:
@@ -166,6 +193,7 @@ def create_app(
     dev_origin: str | None = None,
     disconnect_grace_seconds: float = 15.0,
     demo_mode: bool = False,
+    tutor: TutorService | None = None,
 ) -> FastAPI:
     if disconnect_grace_seconds < 0:
         raise ValueError("disconnect_grace_seconds cannot be negative")
@@ -185,6 +213,7 @@ def create_app(
 
     controller.on_update = publish
     presence = Presence(controller, disconnect_grace_seconds)
+    tutor = tutor or TutorService()
     token = secrets.token_urlsafe(32)
 
     @asynccontextmanager
@@ -198,6 +227,7 @@ def create_app(
 
     app = FastAPI(title="StudySync local service", lifespan=lifespan)
     app.state.controller = controller
+    app.state.tutor = tutor
 
     def safe_origin(host: str | None, origin: str | None, fetch_site: str | None) -> bool:
         if not host or host.split(":", 1)[0].lower() not in allowed_hosts:
@@ -239,6 +269,18 @@ def create_app(
             raise HTTPException(status_code=404, detail="Session not found")
         return snapshot
 
+    def active_snapshot(session_id: str) -> SessionSnapshot:
+        snapshot = matching_snapshot(session_id)
+        if snapshot.status not in ("running", "paused"):
+            raise HTTPException(status_code=409, detail="Start an active study session first")
+        return snapshot
+
+    def help_prompt(body: HelpText) -> str:
+        try:
+            return make_prompt(body.mode, body.topic, body.excerpt)
+        except TutorError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
     @app.get("/health")
     def health():
         snapshot = controller.snapshot()
@@ -246,6 +288,7 @@ def create_app(
             "service": "ready",
             "model_present": DEFAULT_MODEL_PATH.is_file(),
             "key_configured": bool(os.environ.get("GEMINI_API_KEY")),
+            "tutor_ready": tutor.ready(),
             "session_status": snapshot.status if snapshot else "idle",
             "demo_mode": demo_mode,
         }
@@ -263,7 +306,7 @@ def create_app(
     async def start_session(body: SessionRequest):
         try:
             snapshot = await asyncio.to_thread(
-                controller.start, body.subject, body.goal, body.duration_minutes
+                controller.start, body.subject, body.goal, body.duration_minutes, body.monitoring
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -298,6 +341,55 @@ def create_app(
     async def stop_session(session_id: str):
         matching_snapshot(session_id)
         return asdict(await asyncio.to_thread(controller.stop))
+
+    @app.post("/sessions/{session_id}/help/preview", dependencies=[Depends(require_token)])
+    def preview_help(session_id: str, body: HelpText):
+        active_snapshot(session_id)
+        prompt = help_prompt(body)
+        return {"prompt": prompt, "digest": prompt_digest(prompt)}
+
+    @app.post("/sessions/{session_id}/help", dependencies=[Depends(require_token)])
+    async def request_help(session_id: str, body: HelpRequest):
+        active_snapshot(session_id)
+        if body.offer_id and not controller.offer_was_accepted(body.offer_id):
+            raise HTTPException(status_code=409, detail="Accept the offer before using it for a guide")
+        try:
+            return await tutor.ask(
+                session_id, body.request_id, body.mode, body.topic,
+                body.excerpt, body.approved_digest,
+            )
+        except TutorError as exc:
+            raise HTTPException(status_code=exc.status, detail={
+                "code": exc.code, "message": exc.message,
+            }) from exc
+
+    @app.post("/sessions/{session_id}/feedback", dependencies=[Depends(require_token)])
+    def submit_feedback(session_id: str, body: FeedbackRequest):
+        matching_snapshot(session_id)
+        if body.choice not in (
+            "useful", "irrelevant", "too_easy", "too_hard", "incorrect", "wrong_cue"
+        ):
+            raise HTTPException(status_code=422, detail="Choose a valid feedback option")
+        return tutor.feedback(session_id, body.choice)
+
+    @app.post("/sessions/{session_id}/offers/{offer_id}/action", dependencies=[Depends(require_token)])
+    def offer_action(session_id: str, offer_id: str, body: OfferActionRequest):
+        active_snapshot(session_id)
+        try:
+            result = controller.act_offer(offer_id, body.action)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if body.action == "wrong_cue":
+            tutor.feedback(session_id, "wrong_cue")
+        return result
+
+    @app.post("/sessions/{session_id}/offer-classes", dependencies=[Depends(require_token)])
+    def offer_classes(session_id: str, body: OfferClassesRequest):
+        active_snapshot(session_id)
+        try:
+            return asdict(controller.set_offer_classes(set(body.enabled)))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.websocket("/sessions/{session_id}/events")
     async def session_events(websocket: WebSocket, session_id: str):
@@ -341,7 +433,7 @@ def create_app(
             finally:
                 bus.unsubscribe(queue)
                 presence.disconnected(session_id)
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, EndOfStream):
             return
         except ValueError:
             await websocket.close(code=1008)
